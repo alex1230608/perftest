@@ -218,6 +218,7 @@ int main(int argc, char *argv[])
 		return FAILURE;
 	}
 
+	printf("Start to run\n");
 	if (user_param.output == FULL_VERBOSITY) {
 		if (user_param.report_per_port) {
 			printf(RESULT_LINE_PER_PORT);

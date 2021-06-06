@@ -3070,8 +3070,8 @@ void print_report_bw (struct perftest_parameters *user_param, struct bw_report_d
 		num_of_qps /= 2;
 
 	if (user_param->noPeak == OFF) {
-		printf("Calculating peak bandwidth. num_of_calculated_iters: %ld, num_of_qps: %d, post_list: %d, cq_mod: %d\n",
-			num_of_calculated_iters, num_of_qps, user_param->post_list, user_param->cq_mod);
+		// printf("Calculating peak bandwidth. num_of_calculated_iters: %ld, num_of_qps: %d, post_list: %d, cq_mod: %d\n",
+		// 	num_of_calculated_iters, num_of_qps, user_param->post_list, user_param->cq_mod);
 		/* Find the peak bandwidth unless asked not to in command line */
 		for (i = 0; i < num_of_calculated_iters * num_of_qps; i += user_param->post_list) {
 			for (j = ROUND_UP(i + 1, user_param->cq_mod) - 1; j < num_of_calculated_iters * num_of_qps;
@@ -3135,7 +3135,7 @@ void print_report_bw (struct perftest_parameters *user_param, struct bw_report_d
 	my_bw_rep->msgRate_avg_p2 = msgRate_avg_p2;
 	my_bw_rep->sl = user_param->sl;
 
-	printf("Printing full_bw_report\n");
+	// printf("Printing full_bw_report\n");
 	if (!user_param->duplex || (user_param->verb == SEND && user_param->test_type == DURATION)
 			|| user_param->test_method == RUN_INFINITELY || user_param->connection_type == RawEth)
 		print_full_bw_report(user_param, my_bw_rep, NULL);

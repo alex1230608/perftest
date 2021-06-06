@@ -221,6 +221,7 @@ int main(int argc, char *argv[])
 		return FAILURE;
 	}
 
+	printf("Start to run\n");
 	if (user_param.output == FULL_VERBOSITY) {
 		if (user_param.report_per_port) {
 			printf(RESULT_LINE_PER_PORT);
@@ -336,10 +337,10 @@ int main(int argc, char *argv[])
 			fprintf(stderr," Failed to complete run_iter_bw function successfully\n");
 			return FAILURE;
 		}
-		printf("RUN_REGULAR run_iter_bw finished\n");
+		// printf("RUN_REGULAR run_iter_bw finished\n");
 
 		print_report_bw(&user_param,&my_bw_rep);
-		printf("Report printed\n");
+		// printf("Report printed\n");
 
 		if (user_param.duplex) {
 			xchg_bw_reports(&user_comm, &my_bw_rep,&rem_bw_rep,atof(user_param.rem_version));

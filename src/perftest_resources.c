@@ -2779,7 +2779,7 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 			#endif
 			// printf("Finished INLINE, xrc setup\n");
 		}
-		printf("Out of num_wr loop\n");
+		// printf("Out of num_wr loop\n");
 	}
 }
 
@@ -3301,7 +3301,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS)
 		user_param->tcompleted[0] = get_cycles();
 
-	printf("Finished\n");
+	// printf("Finished\n");
 cleaning:
 
 	free(wc);

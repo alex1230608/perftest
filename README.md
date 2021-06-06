@@ -1,5 +1,21 @@
 # Support Trace
 
+## To build
+
+Usually, you may need to install a dependent package
+```
+sudo apt-get install libpci-dev
+```
+
+Then, in the perftest folder, run
+```
+./autogen.sh
+./configure
+make -j
+```
+
+## To run
+
 Use the following command at server side
 ```
 ./ib_read_bw -d <dev_name> -F -p 10000 --trace_filename <trace_file> -n <trace_length> -x <gid_index>
