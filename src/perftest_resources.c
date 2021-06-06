@@ -628,6 +628,28 @@ static inline int post_send_method(struct pingpong_context *ctx, int index,
 
 }
 
+static inline int post_send_method_trace(struct pingpong_context *ctx, int index,
+	struct perftest_parameters *user_param)
+{
+	#ifdef HAVE_IBV_WR_API
+	fprintf(stderr,"Error we don't support HAVE_IBV_WR_API flag yet for trace tests");
+	exit(-1);
+	if (!user_param->use_old_post_send)
+		return (*ctx->new_post_send_work_request_func_pointer)(ctx, index, user_param);
+	#endif
+	// struct ibv_send_wr *wr = &ctx->wr[index*user_param->post_list + ctx->scnt[index]];
+	// printf("Sending req %ld: raddr: %lu, laddr: %lu, rkey: %u, lkey: %u, size: %u\n",
+	// 	ctx->scnt[index],
+	// 	wr->wr.rdma.remote_addr,
+	// 	wr->sg_list[0].addr,
+	// 	wr->wr.rdma.rkey,
+	// 	wr->sg_list[0].lkey,
+	// 	wr->sg_list[0].length);
+	struct ibv_send_wr 	*bad_wr;
+	int ret = ibv_post_send(ctx->qp[index], &ctx->wr[index*user_param->post_list + ctx->scnt[index]], &bad_wr);
+	return ret;
+
+}
 #ifdef HAVE_XRCD
 /******************************************************************************
  *
@@ -917,10 +939,82 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 		memset(user_param->tcompleted, 0, sizeof(cycles_t) * tarr_size);
 	}
 
-	if (user_param->machine == CLIENT || user_param->tst == LAT || user_param->duplex) {
+	// Prepare requests
+	if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+		FILE *fp = fopen(user_param->trace_filename, "r");
+		if (!fp) {
+			perror("Failed to open trace file");
+			exit(errno);
+		}
+		uint64_t ALLOC_UNIT = 10000000;
+		user_param->reqs = (struct req_meta_t*) malloc(ALLOC_UNIT * sizeof(struct req_meta_t));
+		struct req_meta_t *reqs = user_param->reqs;
+		user_param->num_reqs = 0;
+		char *line = (char*) malloc(1000 * sizeof(char));
+		char *kvs_key = (char*)malloc(1000 * sizeof(char));
+		uint64_t addr;
+		uint64_t obj_size;
+		size_t len = 1000;
+		uint64_t addr_end = 0;
+		user_param->max_obj_size = 0;
+		// Skip data until seeing "========="
+		while (getline(&line, &len, fp) != -1) {
+			if (strcmp(line, "========\n") == 0)
+				break;
+			if (sscanf(line, "%[^|]|%lu|%lu", kvs_key, &addr, &obj_size) != 3) {
+				printf("format error: data distribution file should have format "
+						"<kvs_key>|<addr>|<obj_size>\n");
+				exit(-2);
+			}
+			if (addr_end < addr+obj_size)
+				addr_end = addr + obj_size;
+			if (user_param->max_obj_size < obj_size)
+				user_param->max_obj_size = obj_size;
+		}
+		if (user_param->machine == CLIENT) {
+			user_param->size = user_param->max_obj_size;
+		} else {
+			user_param->size = addr_end;
+		}
 
-		ALLOCATE(ctx->sge_list, struct ibv_sge,user_param->num_of_qps * user_param->post_list);
-		ALLOCATE(ctx->wr, struct ibv_send_wr, user_param->num_of_qps * user_param->post_list);
+		uint64_t time;
+		char op[100];
+		uint64_t req_size;
+		while (getline(&line, &len, fp) != -1) {
+			// printf("line: %s", line);
+			if (sscanf(line, "%lu|%[^|]|%[^|]|%lu|%lu", &time, op, kvs_key, &addr, &req_size) != 5) {
+				printf("format error: trace file should have format "
+					"<time>|<op>|<kvs_key>|<addr>|<obj_size>\n");
+				exit(-2);
+			}
+			if ((user_param->num_reqs % ALLOC_UNIT) == 0 && user_param->num_reqs != 0) {
+				reqs = realloc(user_param->reqs, (user_param->num_reqs + ALLOC_UNIT) * sizeof(struct req_meta_t));
+				if (!reqs) {
+					perror("Cannot realloc reqs array");
+					exit(errno);
+				}
+				user_param->reqs = reqs;
+			}
+			reqs[user_param->num_reqs].addr_offset = addr;
+			reqs[user_param->num_reqs].verb = (strcmp(op, "Write") == 0 ? WRITE : READ);
+			reqs[user_param->num_reqs++].size = req_size;
+		}
+		free(kvs_key);
+		free(line);
+		fclose(fp);
+	}
+
+
+	if (user_param->machine == CLIENT || user_param->tst == LAT || user_param->duplex) {
+		if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+			ALLOCATE(ctx->sge_list, struct ibv_sge,user_param->num_of_qps * user_param->num_reqs);
+			ALLOCATE(ctx->wr, struct ibv_send_wr, user_param->num_of_qps * user_param->num_reqs);
+
+			user_param->iters = user_param->num_reqs;
+		} else {
+			ALLOCATE(ctx->sge_list, struct ibv_sge,user_param->num_of_qps * user_param->post_list);
+			ALLOCATE(ctx->wr, struct ibv_send_wr, user_param->num_of_qps * user_param->post_list);
+		}
 		ALLOCATE(ctx->rem_qpn, uint32_t, user_param->num_of_qps);
 		if ((user_param->verb == SEND && user_param->connection_type == UD) ||
 				user_param->connection_type == DC || user_param->connection_type == SRD) {
@@ -950,6 +1044,7 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 	* with reference to number of flows and number of QPs */
 	ctx->buff_size = INC(BUFF_SIZE(ctx->size, ctx->cycle_buffer),
 				 ctx->cache_line_size) * 2 * num_of_qps_factor * user_param->flows;
+	printf("Buffer size: %lu\n", ctx->buff_size);
 	ctx->send_qp_buff_size = ctx->buff_size / num_of_qps_factor / 2;
 	ctx->flow_buff_size = ctx->send_qp_buff_size / user_param->flows;
 	user_param->buff_size = ctx->buff_size;
@@ -1349,19 +1444,23 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 	} else {
 		/* Allocating buffer for data, in case driver not support contig pages. */
 		if (ctx->is_contig_supported == FAILURE) {
-			#if defined(__FreeBSD__)
-			posix_memalign(&ctx->buf[qp_index], user_param->cycle_buffer, ctx->buff_size);
-			#else
-			if (user_param->use_hugepages) {
-				if (alloc_hugepage_region(ctx, qp_index) != SUCCESS){
-					fprintf(stderr, "Failed to allocate hugepage region.\n");
-					return FAILURE;
+			if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+				ctx->buf[qp_index] = malloc(ctx->buff_size);
+			} else {
+				#if defined(__FreeBSD__)
+				posix_memalign(&ctx->buf[qp_index], user_param->cycle_buffer, ctx->buff_size);
+				#else
+				if (user_param->use_hugepages) {
+					if (alloc_hugepage_region(ctx, qp_index) != SUCCESS){
+						fprintf(stderr, "Failed to allocate hugepage region.\n");
+						return FAILURE;
+					}
+					memset(ctx->buf[qp_index], 0, ctx->buff_size);
+				} else if  (ctx->is_contig_supported == FAILURE) {
+					ctx->buf[qp_index] = memalign(user_param->cycle_buffer, ctx->buff_size);
 				}
-				memset(ctx->buf[qp_index], 0, ctx->buff_size);
-			} else if  (ctx->is_contig_supported == FAILURE) {
-				ctx->buf[qp_index] = memalign(user_param->cycle_buffer, ctx->buff_size);
+				#endif
 			}
-			#endif
 			if (!ctx->buf[qp_index]) {
 				fprintf(stderr, "Couldn't allocate work buf.\n");
 				return FAILURE;
@@ -1374,14 +1473,19 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 		}
 	}
 
-	if (user_param->verb == WRITE) {
+	if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
 		flags |= IBV_ACCESS_REMOTE_WRITE;
-	} else if (user_param->verb == READ) {
 		flags |= IBV_ACCESS_REMOTE_READ;
-		if (user_param->transport_type == IBV_TRANSPORT_IWARP)
+	} else {
+		if (user_param->verb == WRITE) {
 			flags |= IBV_ACCESS_REMOTE_WRITE;
-	} else if (user_param->verb == ATOMIC) {
-		flags |= IBV_ACCESS_REMOTE_ATOMIC;
+		} else if (user_param->verb == READ) {
+			flags |= IBV_ACCESS_REMOTE_READ;
+			if (user_param->transport_type == IBV_TRANSPORT_IWARP)
+				flags |= IBV_ACCESS_REMOTE_WRITE;
+		} else if (user_param->verb == ATOMIC) {
+			flags |= IBV_ACCESS_REMOTE_ATOMIC;
+		}
 	}
 
 #ifdef HAVE_RO
@@ -1395,6 +1499,8 @@ int create_single_mr(struct pingpong_context *ctx, struct perftest_parameters *u
 
 	if (!ctx->mr[qp_index]) {
 		fprintf(stderr, "Couldn't allocate MR\n");
+		perror("ibv_reg_mr");
+		printf("ctx->buff_size: %lu\n", ctx->buff_size);
 		return FAILURE;
 	}
 
@@ -2020,11 +2126,15 @@ int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_par
 		flags |= IBV_QP_QKEY;
 	} else if (!(user_param->connection_type == DC &&
 			!is_dc_server_side)) {
-		switch (user_param->verb) {
-			case ATOMIC: attr.qp_access_flags = IBV_ACCESS_REMOTE_ATOMIC; break;
-			case READ  : attr.qp_access_flags = IBV_ACCESS_REMOTE_READ;  break;
-			case WRITE : attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE; break;
-			case SEND  : attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
+		if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+			attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+		} else {
+			switch (user_param->verb) {
+				case ATOMIC: attr.qp_access_flags = IBV_ACCESS_REMOTE_ATOMIC; break;
+				case READ  : attr.qp_access_flags = IBV_ACCESS_REMOTE_READ;  break;
+				case WRITE : attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE; break;
+				case SEND  : attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
+			}
 		}
 		flags |= IBV_QP_ACCESS_FLAGS;
 	}
@@ -2471,6 +2581,7 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
 		struct pingpong_dest *rem_dest)
 {
+
 	int i,j;
 	int num_of_qps = user_param->num_of_qps;
 	int xrc_offset = 0;
@@ -2490,16 +2601,26 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 		ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
 
 		if (user_param->mac_fwd) {
-			if (user_param->mr_per_qp) {
-				ctx->sge_list[i*user_param->post_list].addr =
-					(uintptr_t)ctx->buf[0] + (num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+			if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+				printf("mr_per_qp: %d\n", user_param->mr_per_qp);
+				ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i]; // + user_param->reqs[0].addr_offset;
 			} else {
-				ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+				if (user_param->mr_per_qp) {
+					ctx->sge_list[i*user_param->post_list].addr =
+						(uintptr_t)ctx->buf[0] + (num_of_qps + i)*BUFF_SIZE(ctx->size,ctx->cycle_buffer);
+				} else {
+					ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
+				}
 			}
 		}
 
-		if (user_param->verb == WRITE || user_param->verb == READ)
-			ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr;
+		if (user_param->verb == WRITE || user_param->verb == READ) {
+			if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+				ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr + user_param->reqs[0].addr_offset;
+			} else {
+				ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr;
+			}
+		}
 
 		else if (user_param->verb == ATOMIC)
 			ctx->wr[i*user_param->post_list].wr.atomic.remote_addr = rem_dest[xrc_offset + i].vaddr;
@@ -2513,84 +2634,130 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 				ctx->rem_addr[i] = rem_dest[xrc_offset + i].vaddr;
 		}
 
-		for (j = 0; j < user_param->post_list; j++) {
+		int num_wr;
+		if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+			num_wr = user_param->num_reqs;
+		} else {
+			num_wr = user_param->post_list;
+		}
+		for (j = 0; j < num_wr; j++) {
 
-			ctx->sge_list[i*user_param->post_list + j].length =
-				(user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
+			// printf("Req %d\n", j);
+			if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+				ctx->sge_list[i*num_wr + j].length =
+					(user_param->connection_type == RawEth) ? (user_param->reqs[j].size - HW_CRC_ADDITION) : user_param->reqs[j].size;
+			} else {
+				ctx->sge_list[i*num_wr + j].length =
+					(user_param->connection_type == RawEth) ? (user_param->size - HW_CRC_ADDITION) : user_param->size;
+			}
 
-			ctx->sge_list[i*user_param->post_list + j].lkey = ctx->mr[i]->lkey;
+			ctx->sge_list[i*num_wr + j].lkey = ctx->mr[i]->lkey;
 
 			if (j > 0) {
 
-				ctx->sge_list[i*user_param->post_list +j].addr = ctx->sge_list[i*user_param->post_list + (j-1)].addr;
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					ctx->sge_list[i*num_wr +j].addr = (uintptr_t)ctx->buf[i]; // + user_param->reqs[j].addr_offset;
+				} else {
+					ctx->sge_list[i*num_wr +j].addr = ctx->sge_list[i*num_wr + (j-1)].addr;
+				}
 
-				if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && user_param->size <= (ctx->cycle_buffer / 2))
-					increase_loc_addr(&ctx->sge_list[i*user_param->post_list +j],user_param->size,
-							j-1,ctx->my_addr[i],0,ctx->cache_line_size,ctx->cycle_buffer);
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					// if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && user_param->reqs[j].size <= (ctx->cycle_buffer / 2))
+					// 	increase_loc_addr(&ctx->sge_list[i*num_wr +j],user_param->reqs[j].size,
+					// 			j-1,ctx->my_addr[i],0,ctx->cache_line_size,ctx->cycle_buffer);
+
+				} else {
+					if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && user_param->size <= (ctx->cycle_buffer / 2))
+						increase_loc_addr(&ctx->sge_list[i*num_wr +j],user_param->size,
+								j-1,ctx->my_addr[i],0,ctx->cache_line_size,ctx->cycle_buffer);
+				}
 			}
 
-			ctx->wr[i*user_param->post_list + j].sg_list = &ctx->sge_list[i*user_param->post_list + j];
-			ctx->wr[i*user_param->post_list + j].num_sge = MAX_SEND_SGE;
-			ctx->wr[i*user_param->post_list + j].wr_id   = i;
+			ctx->wr[i*num_wr + j].sg_list = &ctx->sge_list[i*num_wr + j];
+			ctx->wr[i*num_wr + j].num_sge = MAX_SEND_SGE;
+			ctx->wr[i*num_wr + j].wr_id   = i;
 
-			if (j == (user_param->post_list - 1)) {
-				ctx->wr[i*user_param->post_list + j].next = NULL;
+			if (j == (num_wr - 1)) {
+				ctx->wr[i*num_wr + j].next = NULL;
 			} else {
-				ctx->wr[i*user_param->post_list + j].next = &ctx->wr[i*user_param->post_list+j+1];
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					ctx->wr[i*num_wr + j].next = NULL;
+				} else {
+					ctx->wr[i*num_wr + j].next = &ctx->wr[i*num_wr+j+1];
+				}
 			}
 
 			if ((j + 1) % user_param->cq_mod == 0) {
-				ctx->wr[i*user_param->post_list + j].send_flags = IBV_SEND_SIGNALED;
+				ctx->wr[i*num_wr + j].send_flags = IBV_SEND_SIGNALED;
 			} else {
-				ctx->wr[i*user_param->post_list + j].send_flags = 0;
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					ctx->wr[i*num_wr + j].send_flags = IBV_SEND_SIGNALED;
+				} else {
+					ctx->wr[i*num_wr + j].send_flags = 0;
+				}
 			}
+			// printf("Finished sge length, lkey, wr_id, next, send_flags setup\n");
 
 			if (user_param->verb == ATOMIC) {
-				ctx->wr[i*user_param->post_list + j].opcode = opcode_atomic_array[user_param->atomicType];
+				ctx->wr[i*num_wr + j].opcode = opcode_atomic_array[user_param->atomicType];
 			}
 			else {
-				ctx->wr[i*user_param->post_list + j].opcode = opcode_verbs_array[user_param->verb];
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					ctx->wr[i*num_wr + j].opcode = opcode_verbs_array[user_param->reqs[j].verb];
+				} else {
+					ctx->wr[i*num_wr + j].opcode = opcode_verbs_array[user_param->verb];
+				}
 			}
 			if (user_param->verb == WRITE || user_param->verb == READ) {
 
-				ctx->wr[i*user_param->post_list + j].wr.rdma.rkey = rem_dest[xrc_offset + i].rkey;
+				ctx->wr[i*num_wr + j].wr.rdma.rkey = rem_dest[xrc_offset + i].rkey;
 				if (user_param->connection_type == SRD)
 					ctx->rem_qpn[xrc_offset + i] = rem_dest[xrc_offset + i].qpn;
 				if (j > 0) {
 
-					ctx->wr[i*user_param->post_list + j].wr.rdma.remote_addr =
-						ctx->wr[i*user_param->post_list + (j-1)].wr.rdma.remote_addr;
+					if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+						ctx->wr[i*num_wr + j].wr.rdma.remote_addr =
+							rem_dest[xrc_offset + i].vaddr + user_param->reqs[j].addr_offset;
 
-					if ((user_param->tst == BW || user_param->tst == LAT_BY_BW ) && user_param->size <= (ctx->cycle_buffer / 2))
-						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,
-								j-1,ctx->rem_addr[i],WRITE,ctx->cache_line_size,ctx->cycle_buffer);
+						// if ((user_param->tst == BW || user_param->tst == LAT_BY_BW ) && user_param->reqs[j].size <= (ctx->cycle_buffer / 2))
+						// 	increase_rem_addr(&ctx->wr[i*num_wr + j],user_param->reqs[j].size,
+						// 			j-1,ctx->rem_addr[i],WRITE,ctx->cache_line_size,ctx->cycle_buffer);
+					} else {
+						ctx->wr[i*num_wr + j].wr.rdma.remote_addr =
+							ctx->wr[i*num_wr + (j-1)].wr.rdma.remote_addr;
+
+						if ((user_param->tst == BW || user_param->tst == LAT_BY_BW ) && user_param->size <= (ctx->cycle_buffer / 2))
+							increase_rem_addr(&ctx->wr[i*num_wr + j],user_param->size,
+									j-1,ctx->rem_addr[i],WRITE,ctx->cache_line_size,ctx->cycle_buffer);
+					}
 				}
+				// printf("Finished rkey, remote_addr setup\n");
 
 			} else if (user_param->verb == ATOMIC) {
 
-				ctx->wr[i*user_param->post_list + j].wr.atomic.rkey = rem_dest[xrc_offset + i].rkey;
+				ctx->wr[i*num_wr + j].wr.atomic.rkey = rem_dest[xrc_offset + i].rkey;
 
 				if (j > 0) {
 
-					ctx->wr[i*user_param->post_list + j].wr.atomic.remote_addr =
-						ctx->wr[i*user_param->post_list + j-1].wr.atomic.remote_addr;
+					ctx->wr[i*num_wr + j].wr.atomic.remote_addr =
+						ctx->wr[i*num_wr + j-1].wr.atomic.remote_addr;
 					if (user_param->tst == BW || user_param->tst == LAT_BY_BW)
-						increase_rem_addr(&ctx->wr[i*user_param->post_list + j],user_param->size,
+						increase_rem_addr(&ctx->wr[i*num_wr + j],user_param->size,
 								j-1,ctx->rem_addr[i],ATOMIC,ctx->cache_line_size,ctx->cycle_buffer);
 				}
 
 				if (user_param->atomicType == FETCH_AND_ADD)
-					ctx->wr[i*user_param->post_list + j].wr.atomic.compare_add = ATOMIC_ADD_VALUE;
+					ctx->wr[i*num_wr + j].wr.atomic.compare_add = ATOMIC_ADD_VALUE;
 
 				else
-					ctx->wr[i*user_param->post_list + j].wr.atomic.swap = ATOMIC_SWAP_VALUE;
+					ctx->wr[i*num_wr + j].wr.atomic.swap = ATOMIC_SWAP_VALUE;
 
 
 			} else if (user_param->verb == SEND) {
 
 				if (user_param->connection_type == UD || user_param->connection_type == SRD) {
 
-					ctx->wr[i*user_param->post_list + j].wr.ud.ah = ctx->ah[i];
+					ctx->wr[i*num_wr + j].wr.ud.ah = ctx->ah[i];
 					if (user_param->work_rdma_cm) {
 						ctx->rem_qpn[xrc_offset + i] = ctx->cma_master.nodes[i].remote_qpn;
 						remote_qkey = ctx->cma_master.nodes[i].remote_qkey;
@@ -2598,19 +2765,21 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 						ctx->rem_qpn[xrc_offset + i] = rem_dest[xrc_offset + i].qpn;
 						remote_qkey = DEF_QKEY;
 					}
-					ctx->wr[i*user_param->post_list + j].wr.ud.remote_qkey = remote_qkey;
-					ctx->wr[i*user_param->post_list + j].wr.ud.remote_qpn = ctx->rem_qpn[xrc_offset + i];
+					ctx->wr[i*num_wr + j].wr.ud.remote_qkey = remote_qkey;
+					ctx->wr[i*num_wr + j].wr.ud.remote_qpn = ctx->rem_qpn[xrc_offset + i];
 				}
 			}
 
 			if ((user_param->verb == SEND || user_param->verb == WRITE) && user_param->size <= user_param->inline_size)
-				ctx->wr[i*user_param->post_list + j].send_flags |= IBV_SEND_INLINE;
+				ctx->wr[i*num_wr + j].send_flags |= IBV_SEND_INLINE;
 
 			#ifdef HAVE_XRCD
 			if (user_param->use_xrc)
-				ctx->wr[i*user_param->post_list + j].qp_type.xrc.remote_srqn = rem_dest[xrc_offset + i].srqn;
+				ctx->wr[i*num_wr + j].qp_type.xrc.remote_srqn = rem_dest[xrc_offset + i].srqn;
 			#endif
+			// printf("Finished INLINE, xrc setup\n");
 		}
+		printf("Out of num_wr loop\n");
 	}
 }
 
@@ -2954,6 +3123,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	/* main loop for posting */
 	while (totscnt < tot_iters  || totccnt < tot_iters ||
 		(user_param->test_type == DURATION && user_param->state != END_STATE) ) {
+		// printf("totscnt: %ld, totcnt: %ld, tot_iters: %ld\n", totscnt, totccnt, tot_iters);
 
 		/* main loop to run over all the qps and post each time n messages */
 		for (index =0 ; index < num_of_qps ; index++) {
@@ -2978,7 +3148,11 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)
 					&& !(ctx->scnt[index] == (user_param->iters - 1) && user_param->test_type == ITERATIONS)) {
 
-					ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+					if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+						ctx->wr[index + ctx->scnt[index]].send_flags &= ~IBV_SEND_SIGNALED;
+					} else {
+						ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
+					}
 				}
 
 				if (user_param->noPeak == OFF)
@@ -2987,46 +3161,87 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (user_param->test_type == DURATION && user_param->state == END_STATE)
 					break;
 
-				err = post_send_method(ctx, index, user_param);
+				// printf("Posting, tx_depth: %d\n", user_param->tx_depth);
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					err = post_send_method_trace(ctx, index, user_param);
+				} else {
+					err = post_send_method(ctx, index, user_param);
+				}
 				if (err) {
 					fprintf(stderr,"Couldn't post send: qp %d scnt=%lu \n",index,ctx->scnt[index]);
+					perror("post_sned_method");
+					printf("err: %d\n", err);
 					return_value = FAILURE;
 					goto cleaning;
 				}
+				// printf("Posted\n");
 
-				/* if we have more than single flow and the burst iter is the last one */
-				if (user_param->flows != DEF_FLOWS) {
-					if (++flows_burst_iter == user_param->flows_burst) {
-						flows_burst_iter = 0;
-						/* inc the send_flows_index and update the address */
-						if (++send_flows_index == user_param->flows)
-							send_flows_index = 0;
-						address_offset = send_flows_index * ctx->flow_buff_size;
-						ctx->sge_list[0].addr = primary_send_addr + address_offset;
+				if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+					// /* if we have more than single flow and the burst iter is the last one */
+					// if (user_param->flows != DEF_FLOWS) {
+					// 	if (++flows_burst_iter == user_param->flows_burst) {
+					// 		flows_burst_iter = 0;
+					// 		/* inc the send_flows_index and update the address */
+					// 		if (++send_flows_index == user_param->flows)
+					// 			send_flows_index = 0;
+					// 		address_offset = send_flows_index * ctx->flow_buff_size;
+					// 		ctx->sge_list[0].addr = primary_send_addr + address_offset;
+					// 	}
+					// }
+
+					// /* in multiple flow scenarios we will go to next cycle buffer address in the main buffer*/
+					// if (user_param->post_list == 1 && user_param->reqs[ctx->scnt[index]].size <= (ctx->cycle_buffer / 2)) {
+					// 		increase_loc_addr(ctx->wr[index + ctx->scnt[index]].sg_list,user_param->reqs[ctx->scnt[index]].size, ctx->scnt[index],
+					// 				ctx->my_addr[index] + address_offset , 0, ctx->cache_line_size,
+					// 				ctx->cycle_buffer);
+
+					// 	if (user_param->verb != SEND) {
+					// 		increase_rem_addr(&ctx->wr[index + ctx->scnt[index]], user_param->reqs[ctx->scnt[index]].size,
+					// 				ctx->scnt[index], ctx->rem_addr[index], user_param->verb,
+					// 				ctx->cache_line_size, ctx->cycle_buffer);
+					// 	}
+					// }
+
+				} else {
+					/* if we have more than single flow and the burst iter is the last one */
+					if (user_param->flows != DEF_FLOWS) {
+						if (++flows_burst_iter == user_param->flows_burst) {
+							flows_burst_iter = 0;
+							/* inc the send_flows_index and update the address */
+							if (++send_flows_index == user_param->flows)
+								send_flows_index = 0;
+							address_offset = send_flows_index * ctx->flow_buff_size;
+							ctx->sge_list[0].addr = primary_send_addr + address_offset;
+						}
 					}
-				}
 
-				/* in multiple flow scenarios we will go to next cycle buffer address in the main buffer*/
-				if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
-						increase_loc_addr(ctx->wr[index].sg_list,user_param->size, ctx->scnt[index],
-								ctx->my_addr[index] + address_offset , 0, ctx->cache_line_size,
-								ctx->cycle_buffer);
+					/* in multiple flow scenarios we will go to next cycle buffer address in the main buffer*/
+					if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
+							increase_loc_addr(ctx->wr[index].sg_list,user_param->size, ctx->scnt[index],
+									ctx->my_addr[index] + address_offset , 0, ctx->cache_line_size,
+									ctx->cycle_buffer);
 
-					if (user_param->verb != SEND) {
-						increase_rem_addr(&ctx->wr[index], user_param->size,
-								ctx->scnt[index], ctx->rem_addr[index], user_param->verb,
-								ctx->cache_line_size, ctx->cycle_buffer);
+						if (user_param->verb != SEND) {
+							increase_rem_addr(&ctx->wr[index], user_param->size,
+									ctx->scnt[index], ctx->rem_addr[index], user_param->verb,
+									ctx->cache_line_size, ctx->cycle_buffer);
+						}
 					}
 				}
 
 				ctx->scnt[index] += user_param->post_list;
 				totscnt += user_param->post_list;
 
+				// printf("cq_mod: %d\n", user_param->cq_mod);
 				/* ask for completion on this wr */
 				if (user_param->post_list == 1 &&
 						(ctx->scnt[index]%user_param->cq_mod == user_param->cq_mod - 1 ||
 							(user_param->test_type == ITERATIONS && ctx->scnt[index] == user_param->iters - 1))) {
+					if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+						ctx->wr[index + ctx->scnt[index]].send_flags |= IBV_SEND_SIGNALED;
+					} else {
 						ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+					}
 				}
 
 				/* Check if a full burst was sent. */
@@ -3038,6 +3253,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				}
 			}
 		}
+		// printf("Polling\n");
 		if (totccnt < tot_iters || (user_param->test_type == DURATION &&  totccnt < totscnt)) {
 				if (user_param->use_event) {
 					if (ctx_notify_events(ctx->channel)) {
@@ -3050,6 +3266,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (ne > 0) {
 					for (i = 0; i < ne; i++) {
 						wc_id = (int)wc[i].wr_id;
+						// printf("Receiving req %ld\n", ctx->ccnt[wc_id]);
 
 						if (wc[i].status != IBV_WC_SUCCESS) {
 							NOTIFY_COMP_ERROR_SEND(wc[i],totscnt,totccnt);
@@ -3084,6 +3301,7 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	if (user_param->noPeak == ON && user_param->test_type == ITERATIONS)
 		user_param->tcompleted[0] = get_cycles();
 
+	printf("Finished\n");
 cleaning:
 
 	free(wc);

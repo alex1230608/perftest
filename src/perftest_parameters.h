@@ -262,7 +262,9 @@ typedef enum { LOCAL , REMOTE } PrintDataSide;
 typedef enum {CMP_AND_SWAP, FETCH_AND_ADD} AtomicType;
 
 /* Type of test method. */
-typedef enum { ITERATIONS , DURATION } TestMethod;
+typedef enum { ITERATIONS , DURATION} TestMethod;
+
+typedef enum { CONST_REQ, TRACE_FILE} IterationType;
 
 /* for duration calculation */
 typedef enum { START_STATE, SAMPLE_STATE, STOP_SAMPLE_STATE, END_STATE} DurationStates;
@@ -352,7 +354,20 @@ struct ETH_vlan_header {
         uint16_t eth_type;
 }__attribute__((packed));*/
 
+// For TRACE
+struct req_meta_t {
+	uint64_t addr_offset;
+	VerbType verb;
+	uint64_t size;
+};
+
 struct perftest_parameters {
+	// For TRACE
+	struct req_meta_t		*reqs;
+	uint64_t			num_reqs;
+	uint64_t			max_obj_size;
+	char				*trace_filename;
+	IterationType			iter_type;
 
 	int				port;
 	char				*ib_devname;

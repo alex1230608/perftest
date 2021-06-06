@@ -691,6 +691,7 @@ static void init_perftest_params(struct perftest_parameters *user_param)
 	user_param->duration		= DEF_DURATION;
 	user_param->margin		= DEF_INIT_MARGIN;
 	user_param->test_type		= ITERATIONS;
+	user_param->iter_type		= CONST_REQ;
 	user_param->state		= START_STATE;
 	user_param->tos			= DEF_TOS;
 	user_param->hop_limit		= DEF_HOP_LIMIT;
@@ -1962,6 +1963,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 	static int vlan_en = 0;
 	static int vlan_pcp_flag = 0;
 	static int recv_post_list_flag = 0;
+	static int trace_filename_flag = 0;
 
 	char *server_ip = NULL;
 	char *client_ip = NULL;
@@ -2093,6 +2095,8 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			#if defined HAVE_OOO_ATTR
 			{.name = "use_ooo", .has_arg = 0, .flag = &use_ooo_flag, .val = 1},
 			#endif
+			// for TRACE
+			{.name = "trace_filename", .has_arg = 1, .flag = &trace_filename_flag, .val = 1 },
 			{0}
 		};
 		c = getopt_long(argc,argv,"w:y:p:d:i:m:s:n:t:u:S:x:c:q:I:o:M:r:Q:A:l:D:f:B:T:L:E:J:j:K:k:X:W:aFegzRvhbNVCHUOZP",long_options,NULL);
@@ -2578,6 +2582,13 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 					user_param->recv_post_list = strtol(optarg, NULL, 0);
 					recv_post_list_flag = 0;
 				}
+				// for TRACE
+				if (trace_filename_flag) {
+					user_param->test_type = ITERATIONS;
+					user_param->iter_type = TRACE_FILE;
+					GET_STRING(user_param->trace_filename, strdupa(optarg));
+					trace_filename_flag = 0;
+				}
 				break;
 
 			default:
@@ -3059,6 +3070,8 @@ void print_report_bw (struct perftest_parameters *user_param, struct bw_report_d
 		num_of_qps /= 2;
 
 	if (user_param->noPeak == OFF) {
+		printf("Calculating peak bandwidth. num_of_calculated_iters: %ld, num_of_qps: %d, post_list: %d, cq_mod: %d\n",
+			num_of_calculated_iters, num_of_qps, user_param->post_list, user_param->cq_mod);
 		/* Find the peak bandwidth unless asked not to in command line */
 		for (i = 0; i < num_of_calculated_iters * num_of_qps; i += user_param->post_list) {
 			for (j = ROUND_UP(i + 1, user_param->cq_mod) - 1; j < num_of_calculated_iters * num_of_qps;
@@ -3122,6 +3135,7 @@ void print_report_bw (struct perftest_parameters *user_param, struct bw_report_d
 	my_bw_rep->msgRate_avg_p2 = msgRate_avg_p2;
 	my_bw_rep->sl = user_param->sl;
 
+	printf("Printing full_bw_report\n");
 	if (!user_param->duplex || (user_param->verb == SEND && user_param->test_type == DURATION)
 			|| user_param->test_method == RUN_INFINITELY || user_param->connection_type == RawEth)
 		print_full_bw_report(user_param, my_bw_rep, NULL);
