@@ -980,6 +980,7 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 		uint64_t time;
 		char op[100];
 		uint64_t req_size;
+		user_param->total_bytes = 0;
 		while (getline(&line, &len, fp) != -1) {
 			// printf("line: %s", line);
 			if (sscanf(line, "%lu|%[^|]|%[^|]|%lu|%lu", &time, op, kvs_key, &addr, &req_size) != 5) {
@@ -998,6 +999,7 @@ void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_par
 			reqs[user_param->num_reqs].addr_offset = addr;
 			reqs[user_param->num_reqs].verb = (strcmp(op, "Write") == 0 ? WRITE : READ);
 			reqs[user_param->num_reqs++].size = req_size;
+			user_param->total_bytes += req_size;
 		}
 		free(kvs_key);
 		free(line);

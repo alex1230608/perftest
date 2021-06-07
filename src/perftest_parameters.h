@@ -365,6 +365,7 @@ struct perftest_parameters {
 	// For TRACE
 	struct req_meta_t		*reqs;
 	uint64_t			num_reqs;
+	uint64_t			total_bytes;
 	uint64_t			max_obj_size;
 	char				*trace_filename;
 	IterationType			iter_type;

@@ -3098,7 +3098,11 @@ void print_report_bw (struct perftest_parameters *user_param, struct bw_report_d
 	}
 
 	run_inf_bi_factor = (user_param->duplex && user_param->test_method == RUN_INFINITELY) ? (user_param->verb == SEND ? 1 : 2) : 1 ;
-	tsize = run_inf_bi_factor * user_param->size;
+	if (user_param->test_type == ITERATIONS && user_param->iter_type == TRACE_FILE) {
+		tsize = run_inf_bi_factor * ((double)user_param->total_bytes / user_param->iters);
+	} else {
+		tsize = run_inf_bi_factor * user_param->size;
+	}
 	num_of_calculated_iters *= (user_param->test_type == DURATION) ? 1 : num_of_qps;
 	location_arr = (user_param->noPeak) ? 0 : num_of_calculated_iters - 1;
 	/* support in GBS format */
